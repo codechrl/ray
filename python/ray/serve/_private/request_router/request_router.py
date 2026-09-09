@@ -483,6 +483,7 @@ class RequestRouter(ABC):
         initial_backoff_s: float = RAY_SERVE_ROUTER_RETRY_INITIAL_BACKOFF_S,
         backoff_multiplier: float = RAY_SERVE_ROUTER_RETRY_BACKOFF_MULTIPLIER,
         max_backoff_s: float = RAY_SERVE_ROUTER_RETRY_MAX_BACKOFF_S,
+        request_routing_timeout_s: Optional[float] = None,
         *args,
         **kwargs,
     ):
@@ -497,6 +498,9 @@ class RequestRouter(ABC):
         self.initial_backoff_s = initial_backoff_s
         self.backoff_multiplier = backoff_multiplier
         self.max_backoff_s = max_backoff_s
+
+        # None means a request waits for a replica indefinitely.
+        self.request_routing_timeout_s = request_routing_timeout_s
 
         # Current replicas available to be routed.
         # Updated via `update_replicas`.
@@ -1146,6 +1150,19 @@ class RequestRouter(ABC):
             self._remove_pending_request_from_indices(matched_pending_request)
             return
 
+    def _discard_pending_request(self, pending_request: PendingRequest):
+        """Drop a pending request that will never be fulfilled.
+
+        No routing task runs while a deployment has no replicas, so the lazy
+        cleanup at the top of the routing loop cannot be relied on here.
+        """
+        self._remove_pending_request_from_indices(pending_request)
+        while (
+            len(self._pending_requests_to_fulfill) > 0
+            and self._pending_requests_to_fulfill[0].future.done()
+        ):
+            self._pending_requests_to_fulfill.popleft()
+
     def _get_next_pending_request_to_route(
         self,
     ) -> Optional[PendingRequest]:
@@ -1341,7 +1358,20 @@ class RequestRouter(ABC):
 
             self._add_pending_request_to_indices(pending_request)
             self._maybe_start_routing_tasks()
-            replica = await pending_request.future
+            if self.request_routing_timeout_s is None:
+                replica = await pending_request.future
+            else:
+                try:
+                    replica = await asyncio.wait_for(
+                        pending_request.future, self.request_routing_timeout_s
+                    )
+                except asyncio.TimeoutError:
+                    self._discard_pending_request(pending_request)
+                    raise TimeoutError(
+                        "Failed to route request to a replica of deployment "
+                        f"'{self._deployment_id}' within "
+                        f"{self.request_routing_timeout_s}s."
+                    ) from None
         except asyncio.CancelledError as e:
             pending_request.future.cancel()
             self._remove_pending_request_from_indices(pending_request)

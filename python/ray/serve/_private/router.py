@@ -683,6 +683,7 @@ class AsyncioRouter:
         self._initial_backoff_s: Optional[float] = None
         self._backoff_multiplier: Optional[float] = None
         self._max_backoff_s: Optional[float] = None
+        self._request_routing_timeout_s: Optional[float] = None
 
         # Initializing `self._metrics_manager` before `self.long_poll_client` is
         # necessary to avoid race condition where `self.update_deployment_config()`
@@ -797,6 +798,10 @@ class AsyncioRouter:
                 backoff_kwargs["backoff_multiplier"] = self._backoff_multiplier
             if self._max_backoff_s is not None:
                 backoff_kwargs["max_backoff_s"] = self._max_backoff_s
+            if self._request_routing_timeout_s is not None:
+                backoff_kwargs[
+                    "request_routing_timeout_s"
+                ] = self._request_routing_timeout_s
 
             request_router = self._request_router_class(
                 deployment_id=self.deployment_id,
@@ -871,12 +876,18 @@ class AsyncioRouter:
             deployment_config.request_router_config.backoff_multiplier
         )
         self._max_backoff_s = deployment_config.request_router_config.max_backoff_s
+        self._request_routing_timeout_s = (
+            deployment_config.request_router_config.request_routing_timeout_s
+        )
 
         if self._request_router:
             self._request_router.update_backoff_params(
                 initial_backoff_s=self._initial_backoff_s,
                 backoff_multiplier=self._backoff_multiplier,
                 max_backoff_s=self._max_backoff_s,
+            )
+            self._request_router.request_routing_timeout_s = (
+                self._request_routing_timeout_s
             )
 
         # Guard against the case where request_router is None (e.g., when

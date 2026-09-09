@@ -79,6 +79,10 @@ def pow_2_router(request) -> PowerOfTwoChoicesRequestRouter:
             "max_backoff_s",
             0.001,
         )
+        request_router.request_routing_timeout_s = request.param.get(
+            "request_routing_timeout_s",
+            None,
+        )
         return request_router
 
     s = asyncio.new_event_loop().run_until_complete(
@@ -2191,6 +2195,63 @@ def test_compute_backoff_s_does_not_overflow():
     )
 
     assert router._compute_backoff_s(2048) == router.max_backoff_s
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "pow_2_router",
+    [{"request_routing_timeout_s": 0.05}],
+    indirect=True,
+)
+async def test_request_routing_timeout_raises_when_no_replica_is_assigned(
+    pow_2_router,
+):
+    """A request that cannot be routed within the timeout raises TimeoutError."""
+    s = pow_2_router
+    loop = get_or_create_event_loop()
+
+    task = loop.create_task(s._choose_replica_for_request(fake_pending_request()))
+    with pytest.raises(TimeoutError, match="Failed to route request to a replica"):
+        await asyncio.wait_for(task, timeout=20)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "pow_2_router",
+    [{"request_routing_timeout_s": 0.05}],
+    indirect=True,
+)
+async def test_request_routing_timeout_does_not_apply_once_a_replica_is_assigned(
+    pow_2_router,
+):
+    """The timeout bounds routing only."""
+    s = pow_2_router
+    loop = get_or_create_event_loop()
+
+    r1 = FakeRunningReplica("r1")
+    r1.set_queue_len_response(0)
+    s.update_replicas([r1])
+
+    task = loop.create_task(s._choose_replica_for_request(fake_pending_request()))
+    assert await asyncio.wait_for(task, timeout=20) == r1
+    await asyncio.sleep(0.2)
+
+
+@pytest.mark.asyncio
+async def test_request_routing_timeout_defaults_to_waiting_indefinitely(pow_2_router):
+    """Without the timeout set, routing keeps retrying."""
+    s = pow_2_router
+    loop = get_or_create_event_loop()
+
+    assert s.request_routing_timeout_s is None
+    task = loop.create_task(s._choose_replica_for_request(fake_pending_request()))
+    done, _ = await asyncio.wait([task], timeout=0.2)
+    assert len(done) == 0
+
+    r1 = FakeRunningReplica("r1")
+    r1.set_queue_len_response(0)
+    s.update_replicas([r1])
+    assert (await task) == r1
 
 
 if __name__ == "__main__":
